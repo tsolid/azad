@@ -6,6 +6,8 @@ const env = require("./utils/env");
 const { CleanWebpackPlugin } = require('clean-webpack-plugin');
 const CopyWebpackPlugin = require("copy-webpack-plugin");
 const WriteFilePlugin = require("write-file-webpack-plugin");
+const VueLoaderPlugin = require('vue-loader/lib/plugin')
+
 const imageFileExtensions = ["jpg", "jpeg", "png", "gif", "svg"];
 
 const chrome_extension_options = {
@@ -31,7 +33,7 @@ const chrome_extension_options = {
             },
             {
                 test: /\.css$/,
-                use: ['style-loader','css-loader']
+                use: ['vue-style-loader', 'style-loader','css-loader']
             },
             {
                 test: new RegExp('\.(' + imageFileExtensions.join('|') + ')$'),
@@ -46,10 +48,9 @@ const chrome_extension_options = {
             {
                 test: /\.vue$/,
                 loader: 'vue-loader',
+                exclude: /node_modules/,
                 options: {
-                    loaders: {
-                    }
-                    // other vue-loader options go here
+                    loaders: {}
                 }
             },
         ]
@@ -105,7 +106,8 @@ const chrome_extension_options = {
         }]),
         new CopyWebpackPlugin([{
             from: "src/styles/datatables_override.css"
-        }])
+        }]),
+        new VueLoaderPlugin()
     ]
 };
 

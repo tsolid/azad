@@ -7,6 +7,8 @@ import * as csv from './csv';
 import * as sprintf from 'sprintf-js';
 import * as diagnostic_download from './diagnostic_download';
 import * as azad_order from './order';
+import * as settings from './settings';
+
 
 'use strict';
 
@@ -410,8 +412,7 @@ function reallyDisplayOrders(
                     function() { displayOrders(order_promises, false, false); },
                     'azad_table_button'
                 );
-                addCsvButton(order_promises, true);
-                addCsvButton(order_promises, false);
+                addCsvButton(order_promises);
             });
         } else {
             util.removeButton('plain table');
@@ -420,8 +421,7 @@ function reallyDisplayOrders(
                 function() { displayOrders(order_promises, true, false); },
                 'azad_table_button'
             );
-            addCsvButton(order_promises, true);
-            addCsvButton(order_promises, false);
+            addCsvButton(order_promises);
         }
     });
 
@@ -429,20 +429,22 @@ function reallyDisplayOrders(
     return table_promise;
 }
 
-function addCsvButton(orders: Promise<azad_order.IOrder>[], sum_for_spreadsheet: boolean) {
-    const title = sum_for_spreadsheet ?
-        "download spreadsheet ('.csv') with totals" :
-        "download plain spreadsheet ('.csv')";
-    util.removeButton(title);
-    util.addButton(	
-       title,
-       function() {	
-           displayOrders(orders, false, true).then(
-               table => csv.download(table, sum_for_spreadsheet)
-           );
-       },
-       'azad_table_button'	
-    );
+function addCsvButton( orders: Promise<azad_order.IOrder>[] ): void {
+    settings.getBoolean('show_totals_in_csv', false).then( show_totals => {
+        const title: string = show_totals ?
+            "download spreadsheet ('.csv') with totals" :
+            "download plain spreadsheet ('.csv')";
+        util.removeButton(title);
+        util.addButton(	
+           title,
+           function() {	
+               displayOrders(orders, false, true).then(
+                   table => csv.download(table, show_totals)
+               );
+           },
+           'azad_table_button'	
+        );
+    });
 }
 
 // TODO: refactor so that order retrieval belongs to azad_table, but
