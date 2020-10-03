@@ -840,6 +840,7 @@ function fetchYear(
             '?opt=ab' +
             '&ie=UTF8' +
             '&digitalOrders=1' +
+            '&disableCsd=no-js' +
             '&unifiedOrders=0' +
             '&orderFilter=year-%(year)s' +
             '&startIndex=%(startOrderPos)s' +
@@ -849,6 +850,7 @@ function fetchYear(
             '?opt=ab' +
             '&ie=UTF8' +
             '&digitalOrders=1' +
+            '&disableCsd=no-js' +
             '&unifiedOrders=1' +
             '&orderFilter=year-%(year)s' +
             '&startIndex=%(startOrderPos)s' +

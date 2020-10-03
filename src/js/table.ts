@@ -70,7 +70,7 @@ const COLS: Record<string, any>[] = [
                         ul.appendChild(li);
                         const a = td.ownerDocument.createElement('a');
                         li.appendChild(a);
-                        a.textContent = title + '; ';
+                        a.textContent = title + ':' + items[title] + '; ';
                         a.href = items[title];
                     }
                 }
