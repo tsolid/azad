@@ -5,6 +5,7 @@
 'use strict';
 
 const $ = require('jquery');
+import * as analytics from './google_analytics';
 import * as settings from './settings';
 
 function activateIdle() {
@@ -61,7 +62,21 @@ function connectToBackground() {
 }
 
 function registerActionButtons() {
-    $('#azad_clear_cache').on('click', () => background_port.postMessage({action: 'clear_cache'}));
+    $('#azad_clear_cache').on(
+        'click',
+        () => {
+            background_port.postMessage({action: 'clear_cache'});
+            window.ga(
+                'send',
+                {
+                    hitType: 'event',
+                    eventCategory: 'control',
+                    eventAction: 'clear_cache_click',
+                    eventLabel: ''
+                }
+            );
+        }
+    );
     $('#azad_stop').on('click', () => handleStopClick());
     $('#azad_hide_controls').on('click', () => {
         console.log('closing popup');
@@ -81,6 +96,12 @@ function showYearButtons(years: number[]) {
     
 }
 
+declare global {
+    interface Window {
+        ga(action: string, data: any) : void;
+    }
+}
+
 function handleYearClick(evt: { target: { value: any; }; }) {
     const year = evt.target.value;
     const years = [year];
@@ -94,6 +115,15 @@ function handleYearClick(evt: { target: { value: any; }; }) {
     } else {
         console.warn('background_port not set');
     }
+    window.ga(
+        'send',
+        {
+            hitType: 'event',
+            eventCategory: 'control',
+            eventAction: 'scrape_year_click',
+            eventLabel: 'scrape_year_click:' + year
+        }
+    );
 }
 
 function handleStopClick() {
