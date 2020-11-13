@@ -2,12 +2,16 @@
 
 const $ = require('jquery');
 import 'datatables';
-import * as util from './util';
-import * as csv from './csv';
-import * as sprintf from 'sprintf-js';
-import * as diagnostic_download from './diagnostic_download';
 import * as azad_order from './order';
+import * as csv from './csv';
+import * as diagnostic_download from './diagnostic_download';
+import * as notice from './notice';
+import * as progress_bar from './progress_bar';
 import * as settings from './settings';
+import * as sprintf from 'sprintf-js';
+import * as stats from './statistics';
+import * as urls from './url';
+import * as util from './util';
 
 'use strict';
 
@@ -18,6 +22,7 @@ const TH_CLASS = 'azad_thClass ';
 
 let datatable: any = null;
 const order_map: Record<string, azad_order.IOrder> = {};
+let progress_indicator: progress_bar.IProgressIndicator|null = null;
 
 /**
  * Add a td to the row tr element, and return the td.
@@ -33,8 +38,11 @@ const addCell = function(row: any, value: any) {
 /**
  * Add a td to the row tr element, and return the td.
  */
-const addElemCell = function(row: HTMLElement, elem: HTMLElement): HTMLElement {
-    const td = row.ownerDocument.createElement('td');
+const addElemCell = function(
+        row: HTMLElement,
+        elem: HTMLElement
+): HTMLElement {
+    const td: HTMLTableDataCellElement = row.ownerDocument!.createElement('td');
     td.setAttribute('class', ELEM_CLASS);
     row.appendChild(td);
     td.appendChild(elem);
@@ -63,12 +71,12 @@ const COLS: Record<string, any>[] = [
         field_name: 'items',
         render_func: (order: azad_order.IOrder, td: HTMLElement) => 
             order.items().then( items => {
-                const ul = td.ownerDocument.createElement('ul');
+                const ul = td.ownerDocument!.createElement('ul');
                 for(let title in items) {
                     if (Object.prototype.hasOwnProperty.call(items, title)) {
-                        const li = td.ownerDocument.createElement('li');
+                        const li = td.ownerDocument!.createElement('li');
                         ul.appendChild(li);
-                        const a = td.ownerDocument.createElement('a');
+                        const a = td.ownerDocument!.createElement('a');
                         li.appendChild(a);
                         a.textContent = title + ':' + items[title] + '; ';
                         a.href = items[title];
@@ -143,7 +151,7 @@ const COLS: Record<string, any>[] = [
         field_name: 'payments',
         render_func: (order: azad_order.IOrder, td: HTMLElement) => {
             return order.payments().then( payments => {
-                const ul = td.ownerDocument.createElement('ul');
+                const ul = td.ownerDocument!.createElement('ul');
                 td.textContent = '';
                 payments.forEach( (payment: any) => {
                     const li = document.createElement('li');
@@ -156,11 +164,8 @@ const COLS: Record<string, any>[] = [
                     } else {
                         a.textContent = payment + '; '
                     }
-                    order.id().then(
-                        id => a.setAttribute(
-                            'href',
-                            util.getOrderPaymentUrl(id, util.getSite())
-                        )
+                    order.detail_url().then(
+                        detail_url => a.setAttribute( 'href', detail_url)
                     );
                 });
                 if(datatable) {
@@ -178,7 +183,7 @@ const COLS: Record<string, any>[] = [
         render_func: (order: azad_order.IOrder, td: HTMLElement) => {
             return order.invoice_url().then( url => {
                 if ( url ) {
-                    const link = td.ownerDocument.createElement('a');
+                    const link = td.ownerDocument!.createElement('a');
                     link.textContent = url;
                     link.setAttribute('href', url);
                     td.textContent = '';
@@ -198,7 +203,7 @@ function getCols(): Promise< Record<string, any>[] > {
     const waits: Promise<any>[] = [];
     const results: Record<string, any>[] = [];  
     COLS.forEach( col => {
-        if ( ('sites' in col) ? col.sites.test(util.getSite()) : true ) {
+        if ( ('sites' in col) ? col.sites.test(urls.getSite()) : true ) {
             if ( 'visibility' in col ) {
                 const visible_promise: Promise<boolean> = col.visibility();
                 waits.push(visible_promise);
@@ -223,7 +228,6 @@ function appendCell(
     const td = document.createElement('td')
     td.textContent = 'pending';
     tr.appendChild(td);
-    let value_written_promise: Promise<void> = null;
     const null_converter = function(x: any): any {
         if (x) {
             if (
@@ -242,27 +246,28 @@ function appendCell(
             return '';
         }
     }
-    if (col_spec.hasOwnProperty('render_func')) {
-        value_written_promise = col_spec.render_func(order, td);
-    } else {
-        const value_promise: Promise<any> = <Promise<any>>(
-            order[<keyof azad_order.IOrder>(
-                col_spec.value_promise_func
-            )]()
-        );
-        value_written_promise = value_promise
-            .then(null_converter)
-            .then(
-                (value: string) => {
-                    td.innerText = value;
-                    if(datatable) {
-                        datatable.rows().invalidate();
-                        datatable.draw();
-                    }
-                    return null;
-                }
-            );
-    }
+    const value_written_promise: Promise<void> =
+        col_spec.hasOwnProperty('render_func') ?
+            col_spec.render_func(order, td) :
+            (() => {
+                const value_promise: Promise<any> = <Promise<any>>(
+                    order[<keyof azad_order.IOrder>(
+                        col_spec.value_promise_func
+                    )]()
+                );
+                return value_promise
+                    .then(null_converter)
+                    .then(
+                        (value: string) => {
+                            td.innerText = value;
+                            if(datatable) {
+                                datatable.rows().invalidate();
+                                datatable.draw();
+                            }
+                            return null;
+                        }
+                    ); 
+            })();
     td.setAttribute('class', td.getAttribute('class') + ' ' +
             'azad_col_' + col_spec.field_name + ' ' +
             'azad_numeric_' + (col_spec.is_numeric ? 'yes' : 'no' ) + ' ');
@@ -295,7 +300,7 @@ function addOrderTable(
     wait_for_all_values_before_resolving: boolean
 ): Promise<HTMLTableElement> {
     const addHeader = function(row: HTMLElement, value: string, help: string) {
-        const th = row.ownerDocument.createElement('th');
+        const th = row.ownerDocument!.createElement('th');
         th.setAttribute('class', TH_CLASS);
         row.appendChild(th);
         th.textContent = value;
@@ -312,7 +317,7 @@ function addOrderTable(
     );
     if ( table !== null ) {
         console.log('removing old table');
-        table.parentNode.removeChild(table);
+        table.parentNode!.removeChild(table);
         console.log('removed old table');
     }
     console.log('adding table');
@@ -449,6 +454,7 @@ function reallyDisplayOrders(
                         }));
                     }
                 });
+                addProgressBar();
                 util.removeButton('data table');
                 util.addButton(
                     'plain table',
@@ -458,6 +464,7 @@ function reallyDisplayOrders(
                 addCsvButton(order_promises)
             });
         } else {
+            addProgressBar();
             util.removeButton('plain table');
             util.addButton(
                 'data table',
@@ -472,9 +479,12 @@ function reallyDisplayOrders(
     return table_promise;
 }
 
-function addCsvButton(orders: Promise<azad_order.IOrder>[]) {
+function addProgressBar(): void {
+    progress_indicator = progress_bar.addProgressBar(document.body)
+}
+
+function addCsvButton(orders: Promise<azad_order.IOrder>[]): void {
     const title = "download spreadsheet ('.csv')";
-    util.removeButton(title);
     util.addButton(	
        title,
        function() {	
@@ -515,11 +525,36 @@ export function dumpOrderDiagnostics(order_id: string) {
     const order = order_map[order_id];
     if (order) {
         const utc_today = new Date().toISOString().substr(0,10);
-        order.assembleDiagnostics().then(
-            diagnostics => diagnostic_download.save_json_to_file(
-                diagnostics,
-                order_id + '_' + utc_today + '.json'
-            )
-        );
+        const file_name = order_id + '_' + utc_today + '.json';
+        order.assembleDiagnostics()
+            .then(
+                diagnostics => diagnostic_download.save_json_to_file(
+                    diagnostics,
+                    file_name
+                )
+            ).then(
+                () => notice.showNotificationBar(
+                    'Debug file ' + file_name + ' saved.',
+                    document
+                ),
+                err => {
+                    const msg = 'Failed to create debug file: ' + file_name +
+                                ' ' + err;
+                    console.warn(msg);
+                    notice.showNotificationBar(msg, document);
+                }
+            );
+    }
+}
+
+export function updateProgressBar(): void {
+    if (progress_indicator) {
+        const completed = stats.get('completed');
+        const queued = stats.get('queued');
+        const running = stats.get('running');
+        if (completed!=null && queued!=null && running!=null) {
+           const ratio: number = completed / (completed + queued + running);
+           progress_indicator.update_progress(ratio);
+        }
     }
 }

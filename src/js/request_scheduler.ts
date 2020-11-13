@@ -4,6 +4,8 @@
 
 import * as binary_heap from './binary_heap';
 import * as cachestuff from './cachestuff';
+import * as signin from './signin';
+import * as stats from './statistics';
 
 export interface IResponse<T> {
     result: T,
@@ -20,7 +22,6 @@ export interface IRequestScheduler {
 
     abort(): void;
     clearCache(): void;
-    statistics(): Record<string, number>;
     isLive(): boolean;
 }
 
@@ -39,6 +40,7 @@ class RequestScheduler {
 
     constructor() {
         console.log('constructing new RequestScheduler');
+        this._update_statistics();
     }
 
     _schedule(
@@ -76,7 +78,8 @@ class RequestScheduler {
                     this._schedule(
                         query,
                         event_converter,
-                        (result, query) => resolve({result: result, query: query}),
+                        (result, query) => resolve(
+                            {result: result, query: query}),
                         (query: string) => reject(query),
                         priority,
                         nocache
@@ -99,14 +102,12 @@ class RequestScheduler {
         this.cache.clear();
     }
 
-    statistics() {
-        return {
-            'queued' : this.queue.size(),
-            'running' : this.running_count,
-            'completed' : this.completed_count,
-            'errors' : this.error_count,
-            'cache_hits' : this.cache.hitCount(),
-        };
+    _update_statistics() {
+        stats.set('queued', this.queue.size());
+        stats.set('running', this.running_count);
+        stats.set('completed', this.completed_count);
+        stats.set('errors', this.error_count);
+        stats.set('cache_hits', this.cache.hitCount());
     }
 
     isLive() {
@@ -148,7 +149,8 @@ class RequestScheduler {
             try {
                 return event_converter(evt);
             } catch (ex) {
-                console.error('event conversion failed for ' + query + ' with ' + ex);
+                console.error(
+                    'event conversion failed for ' + query + ' with ' + ex);
                 return null;
             }
         }
@@ -185,6 +187,7 @@ class RequestScheduler {
         // has a chance to tell us about the rest of the work, then the
         // scheduler will shut down by setting this.live to false.
         this.running_count += 1;
+        this._update_statistics();
         setTimeout(
             () => {
                 success_callback(cached_response, query);
@@ -203,80 +206,81 @@ class RequestScheduler {
                 this.running_count -= 1;
                 this.completed_count += 1;
                 this._executeSomeIfPossible();
+                this._update_statistics();
                 this._checkDone();
             }
         );
     }
 
     _sendOne(
-        query: string,
+        url: string,
         event_converter: (evt: any) => any,
         success_callback: (converted_event: any, query: string) => void,
         failure_callback: (query: string) => void,
         nocache: boolean
     ) {
         const req = new XMLHttpRequest();
-        req.open('GET', query, true);
-        req.onerror = function(): void {
+        req.open('GET', url, true);
+        req.onerror = (): void =>  {
             this.running_count -= 1;
             this.error_count += 1;
-            console.log( 'Unknown error fetching ' + query );
+            if (!signin.checkTooManyRedirects(url, req) ) {
+                console.log( 'Unknown error fetching ' + url );
+            }
+            this._update_statistics();
             this._checkDone();
-        }.bind(this);
-        req.onload = function(evt: any) {
+        };
+        req.onload = (evt: any): void => {
             if (!this.live) {
                 this.running_count -= 1;
+                this._update_statistics();
                 return;
             }
             if ( req.status != 200 ) {
                 this.error_count += 1;
-                console.log(
-                    'Got HTTP' + req.status + ' fetching ' + query);
+                console.warn(
+                    'Got HTTP' + req.status + ' fetching ' + url);
                 this.running_count -= 1;
+                this._update_statistics();
                 return;
             }
-            if ( req.responseURL.includes('/ap/signin?') ) {
+            if ( req.responseURL.includes('/signin?') ) {
                 this.error_count += 1;
-                console.log('Got sign-in redirect from: ' + query);
+                this._update_statistics();
+                console.log('Got sign-in redirect from: ' + url);
                 if ( !this.signin_warned ) {
-                    alert('Amazon Order History Reporter Chrome Extension\n\n' +
-                          'It looks like you might have been logged out of Amazon.\n' +
-                          'Sometimes this can be "partial" - some types of order info stay logged in and some do not.\n' +
-                          'I will now attempt to open a new tab with a login prompt. Please use it to login,\n' +
-                          'and then retry your chosen orange button.');
+                    signin.alertPartiallyLoggedOutAndOpenLoginTab(url);
                     this.signin_warned = true;
-                    chrome.runtime.sendMessage(
-                        {
-                            action: 'open_tab',
-                            url: query
-                        }
-                    );
                 }
                 this.running_count -= 1;
+                this._update_statistics();
                 return;
             }
             console.log(
-              'Finished ' + query +
+              'Finished ' + url +
                 ' with queue size ' + this.queue.size());
             const converted = event_converter(evt);
             if (!nocache) {
-                this.cache.set(query, converted);
+                this.cache.set(url, converted);
             }
-            success_callback(converted, query);
+            success_callback(converted, url);
             this._recordSingleSuccess();
-        }.bind(this);
+        };
         req.timeout = 20000;  // 20 seconds
-        req.ontimeout = function(evt: any) {
+        req.ontimeout = (evt: any): void => {
             if (!this.live) {
                 this.running_count -= 1;
+                this._update_statistics();
                 return;
             }
-            console.log('Timed out while fetching: ' + query);
+            console.log('Timed out while fetching: ' + url);
             this.error_count += 1;
             this.running_count -= 1;
+            this._update_statistics();
             this._checkDone();
-        }.bind(this);
+        }
         this.running_count += 1;
+        this._update_statistics();
         req.send();
     }
 

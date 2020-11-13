@@ -1,16 +1,17 @@
 /* Copyright(c) 2019 Philip Mulcahy. */
 
-/* jshint strict: true, esversion: 6 */
-
 'use strict';
 
 const $ = require('jquery');
+
 import * as analytics from './google_analytics';
 import * as settings from './settings';
 
+analytics.init();
+
 function activateIdle() {
     console.log('activateIdle');
-    showOnly(['azad_clear_cache', 'azad_hide_controls']);
+    showOnly(['azad_clear_cache', 'azad_force_logout', 'azad_hide_controls']);
     console.log('hello world');
 }
 
@@ -22,7 +23,7 @@ function activateScraping(years: number[]) {
 
 function activateDone(years: number[]) {
     console.log('activateDone');
-    showOnly(['azad_clear_cache', 'azad_hide_controls']);
+    showOnly(['azad_clear_cache', 'azad_force_logout', 'azad_hide_controls']);
     $('#azad_state').text(years.join(','));
 }
 
@@ -31,10 +32,13 @@ function showOnly(button_ids: any[]) {
     button_ids.forEach( id => $('#' + id).removeClass('hidden') ); 
 }
 
-let background_port: chrome.runtime.Port = null;
+let background_port: chrome.runtime.Port|null = null;
 function connectToBackground() {
     console.log('connectToBackground');
+
+    // @ts-ignore: tsc objects to null first parameter for connect();  
     background_port = chrome.runtime.connect(null, { name: 'azad_control' });
+
     background_port.onMessage.addListener( msg => {
         switch(msg.action) {
             case 'scrape_complete':
@@ -61,25 +65,47 @@ function connectToBackground() {
     });
 }
 
-function registerActionButtons() {
-    $('#azad_clear_cache').on(
-        'click',
-        () => {
-            background_port.postMessage({action: 'clear_cache'});
-            window.ga(
-                'send',
-                {
-                    hitType: 'event',
-                    eventCategory: 'control',
-                    eventAction: 'clear_cache_click',
-                    eventLabel: ''
-                }
-            );
+function sendGAButtonClick(action: string) {
+    window.ga(
+        'send',
+        {
+            hitType: 'event',
+            eventCategory: 'control',
+            eventAction: action,
+            eventLabel: ''
         }
     );
-    $('#azad_stop').on('click', () => handleStopClick());
+}
+
+function registerActionButtons() {
+    $('#azad_clear_cache').on('click', () => {
+        if (background_port) {
+            console.log('clear cache clicked');
+            background_port.postMessage({action: 'clear_cache'});
+            sendGAButtonClick('clear_cache');
+        } else {
+            console.warn('clear cache clicked, but I have no background port');
+        }
+    });
+    $('#azad_force_logout').on('click', () => {
+        console.log('force logout clicked');
+        if (background_port) {
+            console.log('force logout clicked');
+            background_port.postMessage({action: 'force_logout'});
+            sendGAButtonClick('force_logout');
+        } else {
+            console.log('force logout clicked, but I have no background port');
+        }
+    });
+    $('#azad_stop').on('click', () => {
+        console.log('stop clicked');
+        handleStopClick();
+        sendGAButtonClick('stop_scraping');
+
+    });
     $('#azad_hide_controls').on('click', () => {
         console.log('closing popup');
+        sendGAButtonClick('close_popup');
         window.close();
     });
 }
@@ -127,7 +153,9 @@ function handleYearClick(evt: { target: { value: any; }; }) {
 }
 
 function handleStopClick() {
-    background_port.postMessage({action: 'abort'});
+    if (background_port) {
+        background_port.postMessage({action: 'abort'});
+    }
 }
 
 function init() {
