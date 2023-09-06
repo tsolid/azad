@@ -1,4 +1,4 @@
-/* Copyright(c) 2016-2020 Philip Mulcahy. */
+/* Copyright(c) 2016-2023 Philip Mulcahy. */
 
 'use strict';
 
@@ -13,18 +13,27 @@ export interface IResponse<T> {
     query: string
 }
 
-export interface IRequestScheduler {
-    scheduleToPromise<T>(
-        query: string,
-        event_converter: (evt: { target: { responseText: string } }) => any,
-        priority: string,
-        nocache: boolean
-    ): Promise<IResponse<T>>;
+export type Event = {
+  target: {
+    responseText: string;
+    responseURL: string;
+  }
+};
 
-    abort(): void;
-    clearCache(): void;
-    isLive(): boolean;
-    purpose(): string;
+export type EventConverter = (evt: Event) => any;
+
+export interface IRequestScheduler {
+  scheduleToPromise<T>(
+    query: string,
+    event_converter: EventConverter,
+    priority: string,
+    nocache: boolean
+  ): Promise<IResponse<T>>;
+
+  abort(): void;
+  clearCache(): void;
+  isLive(): boolean;
+  purpose(): string;
 }
 
 class RequestScheduler {
@@ -51,7 +60,7 @@ class RequestScheduler {
 
     _schedule(
         query: string,
-        event_converter: (evt: { target: { responseText: string } }) => any,
+        event_converter: EventConverter,
         success_callback: (results: any, query: string) => void,
         failure_callback: (query: string) => void,
         priority: string,
@@ -74,12 +83,12 @@ class RequestScheduler {
 
     scheduleToPromise<T>(
         query: string,
-        event_converter: (evt: { target: { responseText: string } }) => any,
+        event_converter: EventConverter,
         priority: string,
         nocache: boolean
     ): Promise<IResponse<T>> {
         query = url.normalizeUrl(query);
-        return new Promise<any>(
+        return new Promise<IResponse<T>>(
             (resolve, reject) => {
                 try {
                     this._schedule(
@@ -96,7 +105,6 @@ class RequestScheduler {
                 }
             }
         );
-
     }
 
     abort() {
@@ -125,7 +133,7 @@ class RequestScheduler {
     // or by sending it out.
     _execute(
         query: string,
-        event_converter: (evt: any) => any,
+        event_converter: EventConverter,
         success_callback: (converted_event: any, query: string) => void,
         failure_callback: (query: string) => void,
         priority: number,
