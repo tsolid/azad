@@ -3,279 +3,311 @@
 'use strict';
 
 import * as azad_order from './order';
-import * as csv from './csv';
 import * as azad_table from './table';
+import * as business from './business';
+import * as csv from './csv';
+import {dateToDateIsoString} from './date';
+import * as extraction from './extraction';
+import * as git_hash from './git_hash';
+import * as iframeWorker from './iframe-worker';
+const lzjs = require('lzjs');
 import * as notice from './notice';
+import * as periods from './periods';
+import * as pageType from './page_type';
+import * as ports from './ports';
 import * as request_scheduler from './request_scheduler';
-import * as signin from './signin';
 import * as settings from './settings';
+import * as signin from './signin';
 import * as stats from './statistics';
+import * as transaction from './transaction';
 import * as urls from './url';
-import * as util from './util';
 
 let scheduler: request_scheduler.IRequestScheduler | null = null;
-let background_port: chrome.runtime.Port | null = null;
 let years: number[] = [];
 let stats_timeout: NodeJS.Timeout | null = null;
 
 const SITE: string = urls.getSite();
 
-function getScheduler(): request_scheduler.IRequestScheduler {
-    if (!scheduler) {
-        resetScheduler('unknown');
-    }
-    return scheduler!;
-}
+const _stats = new stats.Statistics();
 
-function getBackgroundPort() {
-    return background_port;
+function getScheduler(): request_scheduler.IRequestScheduler {
+  if (!scheduler) {
+    resetScheduler('unknown');
+  }
+
+  return scheduler!;
 }
 
 function setStatsTimeout() {
-    const sendStatsMsg = () => {
-        const bg_port = getBackgroundPort();
-        if (bg_port) {
-            stats.publish(bg_port, getScheduler().purpose());
-            azad_table.updateProgressBar();
-        }
-    }
-    if (stats_timeout) {
-        clearTimeout(stats_timeout);
-    }
-    stats_timeout = setTimeout(
-        () => {
-            setStatsTimeout();
-            sendStatsMsg();
-        },
-        2000
-    );
+  const sendStatsMsg = async () => {
+    await _stats.publish(ports.getBackgroundPort, getScheduler().purpose());
+    azad_table.updateProgressBar(_stats);
+  };
+
+  if (stats_timeout) {
+    clearTimeout(stats_timeout);
+  }
+
+  stats_timeout = setTimeout(
+    () => {
+      setStatsTimeout();
+      sendStatsMsg();
+    },
+    2000
+  );
 }
 
 function resetScheduler(purpose: string): void {
-    if (scheduler) {
-        scheduler.abort();
-    }
-    scheduler = request_scheduler.create(purpose);
-    setStatsTimeout();
-}
+  if (scheduler) {
+    scheduler.abort();
+  }
 
-let cached_years: Promise<number[]> | null = null;
-
-function getYears(): Promise<number[]> {
-    const getPromise = function(): Promise<number[]> {
-        const url = 'https://' + SITE + '/gp/css/order-history?ie=UTF8&ref_=nav_youraccount_orders';
-        return signin.checkedFetch(url)
-        .then( response => response.text() )
-        .then( text => {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(
-                text, 'text/html'
-            );
-            const snapshot = util.findMultipleNodeValues(
-                '//select[@name="orderFilter"]/option[@value]',
-                doc.documentElement
-            );
-            const years = snapshot
-                .filter( elem => elem )
-                .filter( elem => elem.textContent )
-                .map(
-                    elem => elem!.textContent!
-                                 .replace('en', '')  // amazon.fr
-                                 .replace('nel', '')  // amazon.it
-                                 .trim())
-                .filter( element => (/^\d+$/).test(element) )
-                .map( (year_string: string) => Number(year_string) )
-                .filter( year => (year >= 2004) )
-                .sort();
-            return years;
-        });
-    }
-    if(!cached_years) {
-        console.log('getYears() needs to do something');
-        cached_years = getPromise();
-    }
-    console.log('getYears() returning ', cached_years);
-    return cached_years;
-}
-
-async function latestYear(): Promise<number> {
-  const all_years = await getYears();
-  return all_years[0];
-}
-
-async function showOrdersOrItems(
-  orders: azad_order.IOrder[],
-  beautiful_table: boolean
-): Promise<HTMLTableElement> {
-    if (orders.length >= 500 && beautiful_table) {
-        beautiful_table = false;
-        notice.showNotificationBar(
-            '500 or more orders found. That\'s a lot!\n' +
-            'We\'ll start you off with a plain table to make display faster.\n' +
-            'You can click the blue "datatable" button to restore sorting, filtering etc.',
-            document
-        );
-    }
-
-    const items_not_orders = await settings.getBoolean('show_items_not_orders');
-
-    // TODO: remove the third param from this call, and chase the removal
-    // all the way down the call tree below it.
-    return azad_table.display(orders, beautiful_table, items_not_orders);
+  _stats.clear();
+  scheduler = request_scheduler.create(purpose, ports.getBackgroundPort, _stats);
+  setStatsTimeout();
 }
 
 async function fetchAndShowOrdersByYears(
-  years: number[]
+  years: number[],
+  client: string,
 ): Promise<HTMLTableElement|undefined> {
+  const ezp_mode: boolean = await settings.getBoolean('ezp_mode');
+
+  if ( ! ezp_mode ) {
     if ( document.visibilityState != 'visible' ) {
-        console.log(
-            'fetchAndShowOrdersByYears() returning without doing anything: ' +
-            'tab is not visible'
-        );
-        return;
+      console.log(
+        'fetchAndShowOrdersByYears() returning without doing anything: ' +
+        'tab is not visible'
+      );
+      return;
     }
-    const purpose: string = years.join(', ');
-    resetScheduler(purpose);
-    const latest_year: number = await latestYear();
-    const order_promises = await azad_order.getOrdersByYear(
-        years,
-        getScheduler(),
-        latest_year,
-        (_date: Date|null) => true,  // DateFilter predicate
-    );
-    return showOrdersOrItems(order_promises, true);
+  }
+
+  const purpose: string = years.join(', ');
+  resetScheduler(purpose);
+  const latestYear: number = await periods.getLatestYear();
+
+  const orderPromises = azad_order.getOrdersByYear(
+    years,
+    getScheduler(),
+    latestYear,
+    (_date: Date|null) => true,  // DateFilter predicate
+  );
+
+  return azad_table.display(
+    orderPromises, true, ports.getBackgroundPort, client);
 }
 
 async function fetchAndShowOrdersByRange(
   start_date: Date, end_date: Date,
-  beautiful_table: boolean
+  beautifulTable: boolean,
+  client: string,
 ): Promise<HTMLTableElement|undefined> {
-    console.info(`fetchAndShowOrdersByRange(${start_date}, ${end_date})`);
-    if ( document.visibilityState != 'visible' ) {
-        console.log(
-            'fetchAndShowOrdersByRange() returning without doing anything: ' +
-            'tab is not visible'
-        );
-        return;
-    }
-    const purpose: string
-      = util.dateToDateIsoString(start_date)
-      + ' -> '
-      + util.dateToDateIsoString(end_date);
-    resetScheduler(purpose);
-    const latest_year: number = await latestYear();
-    const orders = await azad_order.getOrdersByRange(
-      start_date,
-      end_date,
-      getScheduler(),
-      latest_year,
-      function (d: Date|null): boolean {
-        if (typeof(d) === 'undefined') {
-          return false;
-        }
-        return d! >= start_date && d! <= end_date  // DateFilter
-      },
+  console.info(`fetchAndShowOrdersByRange(${start_date}, ${end_date})`);
+
+  if ( document.visibilityState != 'visible' ) {
+    console.log(
+      'fetchAndShowOrdersByRange() returning without doing anything: ' +
+      'tab is not visible'
     );
-    return showOrdersOrItems(orders, beautiful_table);
+    return;
+  }
+
+  const purpose: string
+    = dateToDateIsoString(start_date)
+    + ' -> '
+    + dateToDateIsoString(end_date);
+
+  resetScheduler(purpose);
+  const latest_year: number = await periods.getLatestYear();
+
+  const orders = azad_order.getOrdersByRange(
+    start_date,
+    end_date,
+    getScheduler(),
+    latest_year,
+    function (d: Date|null): boolean {
+      if (typeof(d) === 'undefined') {
+        return false;
+      }
+      return d! >= start_date && d! <= end_date;  // DateFilter
+    },
+  );
+
+  return azad_table.display(
+    orders, beautifulTable, ports.getBackgroundPort, client);
 }
 
-async function fetchShowAndDumpItemsByRange(
-  start_date: Date, end_date: Date
+async function fetchShowAndSendItemsByRange(
+  start_date: Date,
+  end_date: Date,
+  destination_extension_id: string,
+  client: string,
 ): Promise<void> {
   await settings.storeBoolean('ezp_mode', true);
-  const original_items_setting = await settings.getBoolean('show_items_not_orders');
+
+  const original_items_setting = await settings.getBoolean(
+    'show_items_not_orders');
+
   await settings.storeBoolean('show_items_not_orders', true);
+
   const table: (HTMLTableElement|undefined) = await fetchAndShowOrdersByRange(
     start_date,
     end_date,
-    false
+    false,
+    client,
   );
+
   await settings.storeBoolean('show_items_not_orders', original_items_setting);
 
-  // EZP, the primary consumers of this file are processing file with code:
-  // They don't need the file polluted by aggregation rows.
-  const show_totals = false;
-
   if (typeof(table) != 'undefined') {
-    await csv.download(table, show_totals)
+    await csv.send_csv_to_ezp_peer(table, destination_extension_id);
     await settings.storeBoolean('ezp_mode', false);
     return;
+  } else {
+    return undefined;
   }
-  else return undefined;
 }
 
-async function advertisePeriods() {
-    const years = await getYears();
-    console.log('advertising years', years);
-    const bg_port = getBackgroundPort();
-    const periods = [1, 2, 3].concat(years);
-    if (bg_port) {
-        bg_port.postMessage({
-            action: 'advertise_periods',
-            periods: periods
-        });
+async function registerContentScript(isIframeWorker: boolean) {
+  const pgType = pageType.getPageType();
+  const bg_port = await ports.getBackgroundPort();
+
+  if (bg_port) {
+    bg_port.onMessage.addListener(
+      msg => {
+        try {
+          handleMessageFromBackground(pgType, msg);
+        } catch (ex) {
+          console.error(`msg handler caught ${ex} while processing ${msg}`
+          );
+        }
+      }
+    );
+
+    if (isIframeWorker) {
+      iframeWorker.requestInstructions(ports.getBackgroundPort);
     }
+  } else {
+    console.warn('no background port in registerContentScript()');
+  }
+
+  console.log('script registered');
 }
 
-async function registerContentScript() {
-    // @ts-ignore null IS allowed as first arg to connect.
-    background_port = chrome.runtime.connect(null, {name: 'azad_inject'});
-
-    const bg_port = getBackgroundPort();
-    if (bg_port) {
-        bg_port.onMessage.addListener( msg => {
-            try {
-                switch(msg.action) {
-                    case 'dump_order_detail':
-                        azad_table.dumpOrderDiagnostics(msg.order_id)
-                        break;
-                    case 'scrape_years':
-                        years = msg.years;
-                        if (years) {
-                            fetchAndShowOrdersByYears(years);
-                        }
-                        break;
-                    case 'scrape_range':
-                        {
-                          const start_date: Date = new Date(msg.start_date);
-                          const end_date: Date = new Date(msg.end_date);
-                          fetchAndShowOrdersByRange(start_date, end_date, true);
-                        }
-                        break;
-                    case 'scrape_range_and_dump_items':
-                        {
-                          const start_date: Date = new Date(msg.start_date);
-                          const end_date: Date = new Date(msg.end_date);
-                          fetchShowAndDumpItemsByRange(start_date, end_date);
-                        };
-                        break;
-                    case 'clear_cache':
-                        getScheduler().clearCache();
-                        notice.showNotificationBar(
-                            'Amazon Order History Reporter Chrome' +
-                            ' Extension\n\n' +
-                            'Cache cleared',
-                            document
-                        );
-                        break;
-                    case 'force_logout':
-                        signin.forceLogOut('https://' + SITE);
-                        break;
-                    case 'abort':
-                        resetScheduler('aborted');
-                        break;
-                    default:
-                        console.warn('unknown action: ' + msg.action);
-                }
-            } catch (ex) {
-                console.error('message handler blew up with ' + ex +
-                              ' while trying to process ' + msg);
-            }
-        } );
-    }
-    console.log('script registered');
+function handleMessageFromBackground(pageType: string, msg: any): void {
+  switch(pageType) {
+    case 'azad_inject':
+      handleMessageFromBackgroundToRootContentPage(msg);
+      break;
+    case 'azad_iframe_worker':
+      iframeWorker.handleInstructionsResponse(msg);
+      break;
+    default:
+      console.warn('unknown pageType:', pageType);
+  }
 }
 
-console.log('Amazon Order History Reporter starting');
-registerContentScript();
-advertisePeriods();
+function handleMessageFromBackgroundToRootContentPage(msg: any): void {
+  switch(msg.action) {
+    case 'dump_order_detail':
+      resetScheduler('dump_order_detail');
+      azad_table.dumpOrderDiagnostics(msg.order_id, getScheduler);
+      break;
+    case 'scrape_years':
+      {
+        const years = msg.years;
+        const client: string = msg.client;
+        if (years) {
+          fetchAndShowOrdersByYears(years, client);
+        }
+      }
+      break;
+    case 'scrape_range':
+      {
+        const start_date: Date = new Date(msg.start_date);
+        const end_date: Date = new Date(msg.end_date);
+        const client: string = msg.client;
+        fetchAndShowOrdersByRange(
+          start_date,
+          end_date,
+          true,
+          client,
+        );
+      }
+      break;
+    case 'scrape_range_and_dump_items':
+      {
+        const startDate: Date = new Date(msg.start_date);
+        const endDate: Date = new Date(msg.end_date);
+        const client: string = msg.client;
+        fetchShowAndSendItemsByRange(
+          startDate,
+          endDate,
+          msg.sender_id,
+          client,
+        );
+      }
+      break;
+    case 'start_iframe_worker':
+      {
+        const url = urls.normalizeUrl(msg.url, urls.getSite());
+        iframeWorker.createIframe(url, msg.guid, msg.purpose);
+      }
+      break;
+    case 'remove_iframe_worker':
+      iframeWorker.removeIframeWorker(msg.guid);
+      break;
+    case 'transactions':
+      {
+        console.log('got transactions', msg.transactions);
+        const client: string = msg.client;
+        (async ()=>{
+          if (!pageType.isWorker()) {
+            await azad_table.displayTransactions(
+              msg.transactions,
+              true,
+              ports.getBackgroundPort,
+              client,
+            );
+          }
+        })();
+      }
+      break;
+    case 'clear_cache':
+      getScheduler().cache().clear();
+      transaction.clearCache();
+      periods.clearCache();
+      notice.showNotificationBar(
+        'Amazon Order History Reporter Chrome' +
+          ' Extension\n\n' +
+          'Cache cleared',
+        document
+      );
+      break;
+    case 'force_logout':
+      signin.forceLogOut('https://' + SITE);
+      break;
+    case 'abort':
+      resetScheduler('aborted');
+      break;
+    default:
+      console.debug('inject.ts ignoring msg.action: ' + msg.action);
+  }
+}
+
+function initialiseContentScript() {
+  console.log('Amazon Order History Reporter content script initialising');
+  console.log(git_hash.text());
+
+  const isWorker = pageType.isWorker();
+  registerContentScript(isWorker);
+
+  const inIframe = pageType.isIframe();
+
+  if (!inIframe) {
+    periods.init(ports.getBackgroundPort);
+  }
+}
+
+initialiseContentScript();

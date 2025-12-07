@@ -21,12 +21,29 @@
 
 .azad_progress_bar {
     background-color: LightBlue;
+    block: inline;
 }
 
 .azad_progress_worm {
     background-color: Orange;
     height: 25px;
     border-width: 0px;
+}
+
+.azad_banner {
+    margin: 20px;
+}
+
+.azad_ad_container {
+    border-width: 2px;
+    padding: 5px;
+    border-style: solid;
+    border-color: Orange;
+    font-family: arial,sans-serif;
+}
+
+.azad_small_print {
+  font-size: 0.7em;
 }
 
 #azad_order_table {
@@ -45,4 +62,46 @@
     background-color: White;
     opacity: 1;
     transition: opacity 500ms;
+}
+
+.azad_hidden {
+    display: none;
+}
+
+#azad-iframe-box {
+  display: grid;
+  grid-template-columns: auto auto auto;
+
+  border: solid CornflowerBlue;
+  border-width: 5px;
+}
+
+.azad-iframe-worker-container {
+  width: 750px;
+  height: 350px;
+  border: solid Orange;
+  border-width: 2px;
+  padding: 3px;
+}
+
+
+.azad-iframe-worker {
+  display: block;
+  width: 1250px;
+  height: 1000px;
+  transform: scale(0.25);
+  transform-origin: 0 0;
+}
+
+.azad-iframe-worker-title {
+  color: orange;
+  font-weight: bold;
+}
+
+.azad-iframe-worker-url {
+  color: navy;
+}
+
+.azad-iframe-worker-guid {
+  color: silver;
 }

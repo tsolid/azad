@@ -2,8 +2,6 @@
 
 'use strict';
 
-const xpath = require('xpath');
-
 export function defaulted<T>(
     value: T | null | undefined,
     def_value: T
@@ -47,15 +45,75 @@ export function parseStringToDOM(html: string) {
     }
 }
 
-export function isNumeric(n: any) {
-    return !isNaN(parseFloat(n)) && isFinite(n);
+function clean_mixed_decimal_separators(number_string: string): string {
+  if (number_string.includes(',') && number_string.includes('.')) {
+    const seps = number_string.replace(/[^.,]/g, '');
+    const last = seps.substr(seps.length-1,1);
+    const others = seps.replace(last, '');
+    if (others.length != (seps.length-1)) {
+      throw Error(number_string + ' has too many ' + last + ' chars.');
+    }
+    const cleaned = number_string.replace(others[0], '');
+    return cleaned;
+  }
+  return number_string;
 }
 
-function getXPathResult() {
-    if (typeof(XPathResult) === 'undefined') {
-        return xpath.XPathResult;
+export function currencyRegex(): RegExp {
+  // \u20ac is Euro symbol (€).
+  // Sometimes typing it "properly" seems to break the regular
+  // expression.
+  return /(?:\u20ac|€|£|$|AUD|CAD|EUR|GBP|USD)/;
+}
+
+function parseToNumber(i: string | number): number {
+  try {
+    if(typeof i === 'string') {
+      const c = clean_mixed_decimal_separators(i);
+      if (
+        c === 'N/A' ||
+        c === '-' ||
+        c === ''  ||
+        c === 'pending'
+      ) {
+        return 0;
+      } else {
+        const cc = c.trim()
+                    .replace( new RegExp(`^${currencyRegex().source} *`), '' )
+                    .replace( /,/, '.' );
+        const ccc = parseFloat(cc);
+        return ccc;
+      }
     }
-    return XPathResult;
+    if(typeof i === 'number') {
+      return i;
+    }
+  } catch (ex) {
+    console.warn(ex);
+  }
+  return 0;
+}
+
+// Remove the formatting to get integer data for summation
+export function floatVal(v: string | number): number {
+  const candidate = parseToNumber(v);
+
+  if (isNaN(candidate)) {
+    if (typeof(v) === 'string') {
+      const altered = (v as string).replace(currencyRegex(), '').trim();
+
+      if(altered != v) {
+          return floatVal(altered);
+      }
+    }
+    return 0;
+  }
+
+  return candidate;
+}
+
+export function isNumeric(n: any) {
+    return !isNaN(parseFloat(n)) && isFinite(n);
 }
 
 export function addButton(name: string, cb: any, button_class: string) {
@@ -81,68 +139,13 @@ export function removeButton(name: string) {
     }
 }
 
-export function findSingleNodeValue(
-    xpath: string, elem: HTMLElement, context: string
-): Node {
-    try {
-        const node = elem.ownerDocument!.evaluate(
-            xpath,
-            elem,
-            null,
-            getXPathResult().FIRST_ORDERED_NODE_TYPE,
-            null
-        ).singleNodeValue;
-        if (!node) {
-            throw 'No node found';
-        }
-        return node;
-    } catch (ex) {
-        const msg = (
-			'findSingleNodeValue didn\'t match: ' + xpath
-		) + (
-			context ?
-				('; Context:' + context) :
-				''
-		) + '; ' + JSON.stringify(ex);
-        throw msg;
-    }
-}
-
-export function findMultipleNodeValues(
-    xpath: string,
-    elem: HTMLElement,
-): Node[] {
-	try {
-		const snapshot = elem.ownerDocument!.evaluate(
-			xpath,
-			elem,
-			null,
-			getXPathResult().ORDERED_NODE_SNAPSHOT_TYPE,
-			null
-		);
-		const values: Node[] = [];
-		let i;
-		for(i = 0; i !== snapshot.snapshotLength; i += 1) {
-			const node: Node|null = snapshot.snapshotItem(i);
-			if (node) {
-				values.push(node);
-			}
-		}
-		return values;
-	} catch( ex ) {
-		if (ex) {
-			throw ex;
-		}
-		throw 'Unknown exception from findMultipleNodeValues.'
-	}
-}
-
 export function clearBody(): void {
     Array.from(document.body.children).forEach(
         function(elem: Element) {
             if( !(
                 elem.hasAttribute('class') &&
-                elem.getAttribute('class')!.includes('order_reporter_')
+                elem.getAttribute('class')!.includes('order_reporter_') &&
+                elem.getAttribute('class')!.includes('azad')
             )) {
                 document.body.removeChild(elem);
             }
@@ -151,24 +154,38 @@ export function clearBody(): void {
 }
 
 export function moneyRegEx(): RegExp {
-    return /\s+((GBP|USD|CAD|EUR|AUD|[$£€])?\s?(\d+[.,]\d\d))\s+/;
+    return /\s*(-?(GBP|USD|CAD|EUR|AUD|[$£€])?\s?(\d+[.,]\d\d))\s*/;
 /*
     /
-        \s+
+        \s*
         (
+            -?
             (
                 GBP|USD|CAD|EUR|AUD|[$£€]
             )?
             \s?
             (\d+[.,]\d\d)
         )
+        \s*
     /
 */
 }
 
-export function dateToDateIsoString(d: Date): string {
-    return d.toISOString().substr(0,10);
+export function orderIdRegExp(): RegExp {
+  return new RegExp(
+    '.*(' +
+    [
+      // vanilla numeric 3-7-7 with optional leading 'D'
+      // 202-5113396-3949156
+      '[A-Z0-9]\\d\\d-\\d{7}-\\d{7}',
 
+      // 2025+ amazon fresh hex 8-4-4-12
+      // 4a378358-f4f0-445a-87de-111b068ff0fc
+      '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}',
+    ].join('|') +
+    ').*'
+  );
+  // return /.*([A-Z0-9]\d\d-\d{7}-\d{7}).*/;
 }
 
 export async function get_settled_and_discard_rejects<T>(
@@ -195,7 +212,7 @@ class MappedPredicate<T> {
 // Helper for filter_by_async_predicate.
 class MappedPromisedPredicate<T> {
   subject: T;
-  criterion_promise: Promise<boolean>
+  criterion_promise: Promise<boolean>;
 
   constructor(subject: T, criterion_promise: Promise<boolean>) {
     this.subject = subject;
@@ -214,7 +231,7 @@ export async function filter_by_async_predicate<T>(
   predicate: (t: T) => Promise<boolean>
 ): Promise<T[]> {
   const promised_mappings: Promise<MappedPredicate<T>>[] = candidates
-    .map(c => new MappedPromisedPredicate<T>(c, predicate(c)).unified() )
+    .map(c => new MappedPromisedPredicate<T>(c, predicate(c)).unified() );
   const mapped_predicates: MappedPredicate<T>[] = await get_settled_and_discard_rejects(promised_mappings);
   const filtered: T[] = mapped_predicates.filter(mp => mp.criterion).map(mp => mp.subject);
   return filtered;
@@ -239,15 +256,40 @@ export function subtract_months(date: Date, months: number): Date {
   return result;
 }
 
-export function getField(
-    xpath: string,
-    elem: HTMLElement,
-    context: string
-): string|null {
-    try {
-        const valueElem = findSingleNodeValue(xpath, elem, context);
-        return valueElem!.textContent!.trim();
-    } catch (_) {
-        return null;
-    }
+export function is_promise(candidate: any): boolean {
+  if (typeof(candidate) != 'object') {
+    return false;
+  }
+  if ('then' in candidate) {
+    return true;
+  }
+  return false;
+}
+
+export function safe_new_tab_link(url: string, title: string): string {
+  return '<a ' +
+         'href="' + url + '" ' +
+         'target="_blank" ' +
+         'rel="noopener noreferrer"' +
+         '>' + title + '</a>';
+}
+
+/**
+ * Retrieves an array of all text nodes under a given element.
+ * From: stackoverflow.com/questions/10730309/find-all-text-nodes-in-html-page
+ *
+ * @param { Node } el - The element under which to search for text nodes.
+ * @returns { Node[] } An array of text nodes found under the given element.
+ */
+export function textNodesUnder(el: Node): Text[] {
+  const children: Text[] = [];
+  const walker = el.ownerDocument!.createTreeWalker(
+    el,
+    0x4,  // NodeFilter.SHOW_TEXT is undefined in node.js (needed in tests)
+  );
+
+  while(walker.nextNode()) {
+    children.push(walker.currentNode as Text);
+  }
+  return children;
 }

@@ -2,7 +2,7 @@
 
 'use strict';
 
-const ep = require('extpay');
+const ep = require('ExtPay');
 
 // Apparently (https://github.com/glench/ExtPay#manifest-v3)
 // we should fetch a new ExtPay reference each time we need one (for async code)
@@ -37,4 +37,15 @@ export async function display_payment_ui() {
 
 export async function display_login_page() {
   getExtPay().openLoginPage();
+}
+
+export async function display_console() {
+  chrome.tabs.create(
+    {'url': 'https://billing.stripe.com/p/login/14A7sLeQueW49eA0N6eAg00'}
+  );
+}
+
+export async function getLoginId(): Promise<string> {
+  const user = await getExtPay().getUser(); 
+  return user.email;
 }

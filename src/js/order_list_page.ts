@@ -1,233 +1,247 @@
 /* Copyright(c) 2023 Philip Mulcahy. */
 
-import * as order_header from './order_header';
+import * as business from './business';
 import * as dom2json from './dom2json';
+import * as extraction from './extraction';
+import * as iframeWorker from './iframe-worker';
 import * as notice from './notice';
+import * as order_header from './order_header';
+import * as req from './request';
+import * as request from './request';
 import * as request_scheduler from './request_scheduler';
 import * as sprintf from 'sprintf-js';
 import * as urls from './url';
 import * as util from './util';
 
-export interface IOrdersPageData {
-  expected_order_count: number;
-  order_headers: order_header.IOrderHeader[];
-};
+type headerPageUrlGenerator = (
+  site: string, year: number, startOrderIndex: number) => Promise<string>;
 
-async function get_page_data(
+async function getExpectedOrderCount(
   site: string,
   year: number,
-  start_order_number: number, // zero based
-  template: string,
-  scheduling_priority: string,
-  scheduler: request_scheduler.IRequestScheduler,
-  nocache_top_level: boolean,
-): Promise<IOrdersPageData>
-{
-    const nocache: boolean = (start_order_number==0) ? true : nocache_top_level;
-    const response = await scheduler.scheduleToPromise<IOrdersPageData>(
-        generateQueryString(site, year, start_order_number, template),
-        evt => translateOrdersPage(evt, year.toString()),
-        scheduling_priority,
-        nocache,
-    );
-    return response.result;
+  urlGenerator: headerPageUrlGenerator,
+): Promise<number> {
+  const url = await urlGenerator(site, year, 0);
+  const pageReadyXpath = '//span[@class="num-orders"]';
+
+  const response = await iframeWorker.fetchURL(
+    url, pageReadyXpath, 'get expected order count');
+
+  const doc = util.parseStringToDOM(response.html);
+
+  const expectedOrderCount = getExpectedOrderCountFromHeaderDoc(
+    doc, response.url);
+
+  return expectedOrderCount;
 }
 
+function getExpectedOrderCountFromHeaderDoc(
+  doc: HTMLDocument,
+  url: string,  // for logging only
+): number {
+  const context = 'getExpectedOrderCount';
 
-async function get_expected_order_count(
-  site: string,
-  year: number,
-  template: string,
-  scheduler: request_scheduler.IRequestScheduler,
-): Promise<number>
-{
-  const page_data = await get_page_data(
-    site,
-    year,
-    0,  // first order; therefore first page
-    template,
-    '00000',  // want this to happen ASAP
-    scheduler,
-    true,
+  const countSpan = extraction.findSingleNodeValue(
+    '//span[@class="num-orders"]', doc.documentElement, context);
+
+  if ( !countSpan ) {
+    const msg = `Error: cannot find order count elem in: ${url}`;
+    console.error(msg);
+    throw(msg);
+  }
+
+  const textContent = countSpan.textContent;
+  const splits = textContent!.split(' ');
+
+  if (splits.length == 0) {
+    const msg = 'Error: not enough parts';
+    console.error(msg);
+    throw(msg);
+  }
+
+  const expectedOrderCount: number = parseInt(splits[0], 10);
+
+  console.log(
+    `Found ${expectedOrderCount} orders in ${url}`
   );
-  return page_data.expected_order_count;
-};
+
+  if(isNaN(expectedOrderCount)) {
+    console.warn(
+      'Error: cannot find order count in ' + countSpan.textContent
+    );
+  }
+
+  return expectedOrderCount;
+}
 
 async function get_page_of_headers(
   site: string,
   year: number,
-  template: string,
+  urlGenerator: headerPageUrlGenerator,
   start_order_number: number, // zero based
   scheduler: request_scheduler.IRequestScheduler,
-  nocache_top_level: boolean,
-): Promise<order_header.IOrderHeader[]>
-{
-  const page_data = await get_page_data(
-    site,
-    year,
-    start_order_number,
-    template,
-    '2',  // want headers before details, but after order count
+  updateExpectedOrderCount: (count: number)=>void,
+): Promise<OrderHeaderPageData> {
+  const url = await urlGenerator(site, year, start_order_number);
+  const pageReadyXpath = '//*[contains(@class, "yohtmlc-order-id")]';
+  const nocache = start_order_number == 0;
+  const priority = nocache ? '00000' : '2';
+
+  const pageData = request.makeAsyncDynamicRequest(
+    url,
+    'get_page_of_headers',
+    (evt) => translateOrdersPage(evt, year.toString()),
+    pageReadyXpath,
     scheduler,
-    nocache_top_level,
+    '',
+    nocache,
+    `order_list_page.get_page_of_headers: ${start_order_number}`,  // debug_context
+  ) as Promise<OrderHeaderPageData>;
+
+  pageData.then(
+    pageData => {
+      updateExpectedOrderCount(pageData.expectedOrderCount);
+      const headers = pageData.headers;
+      const ids: string = headers.map(h => h.id).join(', ');
+      console.debug(
+        `get_page_of_headers fetched ${url} and discovered these ids: ${ids}`);
+    },
+    err => console.warn(
+      `get_page_of_headers blew up while fetching or processing: ${err}`)
   );
-  return page_data.order_headers;
-};
+
+  return pageData;
+}
+
+function dedupeHeaders(
+  headers: order_header.IOrderHeader[]
+): order_header.IOrderHeader[] {
+  const deduped: order_header.IOrderHeader[] = [];
+  const seen = new Set<string>();
+
+  for (const h of headers) {
+    if (seen.has(h.id)) {
+      continue;
+    }
+
+    seen.add(h.id);
+    deduped.push(h);
+  }
+
+  return deduped;
+}
 
 export async function get_headers(
   site: string,
   year: number,
   scheduler: request_scheduler.IRequestScheduler,
-  nocache_top_level: boolean,
-): Promise<order_header.IOrderHeader[]>
-{
-  async function fetch_headers_for_template(template: string)
-    : Promise<order_header.IOrderHeader[]>
-  {
-    const expected_order_count = await get_expected_order_count(
-      site, year, template, scheduler);
-    const header_promises: Promise<order_header.IOrderHeader[]>[] = [];
-    for(let iorder = 0; iorder < expected_order_count; iorder += 10) {
+): Promise<order_header.IOrderHeader[]> {
+  async function fetch_headers_for_template(
+    urlGenerator: headerPageUrlGenerator
+  ): Promise<order_header.IOrderHeader[]> {
+    let expected_order_count = await getExpectedOrderCount(
+      site, year, urlGenerator);
+
+    console.log(`setting expected order count to ${expected_order_count}`);
+
+    function updateExpectedOrderCount(count: number): void {
+      if (count > expected_order_count) {
+        console.log(
+          'updating expected order count ' +
+          `from ${expected_order_count} to ${count}`);
+
+        expected_order_count = count;
+      }
+    }
+
+    const headerPromises: Promise<OrderHeaderPageData>[] = [];
+
+    function notEnoughPagesRequested(): boolean {
+      const expectedPageCount = Math.floor((expected_order_count-1)/10)+1;
+      return headerPromises.length < expectedPageCount;
+    }
+
+    for(let iorder = 0; notEnoughPagesRequested(); iorder += 10) {
       console.log(
-        'sending request for order: ' + iorder + ' onwards'
+        'creating header page request for order: ' + iorder + ' onwards'
       );
-      header_promises.push(
-        get_page_of_headers(
-          site, year, template, iorder, scheduler, nocache_top_level
-        )
+
+      const headersPageData = get_page_of_headers(
+        site, year, urlGenerator, iorder, scheduler, updateExpectedOrderCount,
+      );
+
+      headerPromises.push(headersPageData);
+    }
+
+    const pages = await util.get_settled_and_discard_rejects(headerPromises);
+    const headers = pages.map(data => data.headers).flat();
+
+    if (headers.length != expected_order_count) {
+      console.error(
+        `expected ${expected_order_count} orders, ` +
+        `but got ${headers.length}`
       );
     }
-    const pages_of_headers = await util.get_settled_and_discard_rejects(header_promises);
-    const headers = pages_of_headers.flat();
+
     return headers;
-  };
-  const templates = selectTemplates(site);
-  const headerss = await util.get_settled_and_discard_rejects(await templates.map(fetch_headers_for_template));
-  return headerss.flat();
+  }
+
+  const isBusinessAcct: boolean = await business.isBusinessAccount();
+
+  const urlGenerators: headerPageUrlGenerator[] = isBusinessAcct ?
+    [business.getOrderHeadersSequencePageURL] :
+    selectTemplates(site).map(
+      template => function(site, year, index) {
+        const url = generateQueryString(site, year, index, template);
+        return Promise.resolve(url);
+      }
+    );
+
+  const pheaderss = urlGenerators.map(ug => fetch_headers_for_template(ug));
+  const headerss = await util.get_settled_and_discard_rejects(pheaderss);
+  const headers = headerss.flat();
+  return dedupeHeaders(headers);
 }
 
-const TEMPLATES_BY_SITE: Record<string, string[]> = {
-  'www.amazon.co.jp': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s'],
-  'www.amazon.co.uk': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s'],
- 'www.amazon.com.au': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s'],
-  'www.amazon.de': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_GB'],
-  'www.amazon.es': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_GB'],
-  'www.amazon.in': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_GB'],
-  'www.amazon.it': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_GB'],
-  'www.amazon.ca': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s'],
-  'www.amazon.fr': ['https://%(site)s/gp/css/order-history' +
-      '?opt=ab&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&returnTo=' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s'],
-  'www.amazon.com': [
-      'https://%(site)s/gp/css/order-history' +
-      '?opt=ab' +
-      '&ie=UTF8' +
-      '&digitalOrders=1' +
-      '&unifiedOrders=0' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_US',
+const BASE_URL_TEMPLATE = 'https://%(site)s/your-orders/orders?' + [
+  // '?ie=UTF8' +
+  'timeFilter=year-%(year)s',
+  'startIndex=%(startOrderPos)s'
+].join('&');
 
-      'https://%(site)s/gp/css/order-history' +
-      '?opt=ab' +
-      '&ie=UTF8' +
-      '&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_US'],
-  'www.amazon.com.mx': [
-      'https://%(site)s/gp/your-account/order-history/ref=oh_aui_menu_date' +
-      '?ie=UTF8' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s',
+const BASE_DIGITAL_URL_TEMPLATE = 'https://www.amazon.com/gp/legacy/order-history?' + [
+  'opt=ab',
+  'orderFilter=year-%(year)s',
+  'startIndex=%(startOrderPos)s',
+  'unifiedOrders=0',
+  'digitalOrders=1',
+  '_encoding=UTF8',
+  'returnTo=',
+].join('&');
 
-      'https://%(site)s/gp/your-account/order-history/ref=oh_aui_menu_yo_new_digital' +
-      '?ie=UTF8' +
-      '&digitalOrders=1' +
-      '&orderFilter=year-%(year)s' +
-      '&unifiedOrders=0' +
-      '&startIndex=%(startOrderPos)s'],
-  'other': [
-      'https://%(site)s/gp/css/order-history' +
-      '?opt=ab' +
-      '&ie=UTF8' +
-      '&digitalOrders=1' +
-      '&unifiedOrders=0' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_GB',
-
-      'https://%(site)s/gp/css/order-history' +
-      '?opt=ab' +
-      '&ie=UTF8' +
-      '&digitalOrders=1' +
-      '&unifiedOrders=1' +
-      '&orderFilter=year-%(year)s' +
-      '&startIndex=%(startOrderPos)s' +
-      '&language=en_GB'],
-};
+const TEMPLATE_BY_SITE: Map<string, string[]> = new Map<string, string[]>([
+  ['www.amazon.ca', [BASE_URL_TEMPLATE + '&language=en_US']],
+  ['www.amazon.co.jp', [BASE_URL_TEMPLATE]],
+  ['www.amazon.co.uk', [BASE_URL_TEMPLATE]],
+  ['www.amazon.com', [
+    BASE_URL_TEMPLATE + '&language=en_US',
+    BASE_DIGITAL_URL_TEMPLATE + '&language=en_US']],
+  ['www.amazon.com.au', [BASE_URL_TEMPLATE]],
+  ['www.amazon.com.mx', [BASE_URL_TEMPLATE + '&language=en_US']],
+  ['www.amazon.de', [BASE_URL_TEMPLATE + '&language=en_GB']],
+  ['www.amazon.es', [BASE_URL_TEMPLATE + '&language=en_GB']],
+  ['www.amazon.fr', [BASE_URL_TEMPLATE + '&language=en_GB']],
+  ['www.amazon.in', [BASE_URL_TEMPLATE + '&language=en_GB']],
+  ['www.amazon.it', [BASE_URL_TEMPLATE + '&language=en_GB']],
+  ['other', [BASE_URL_TEMPLATE + '&language=en_US']],
+]);
 
 function selectTemplates(site: string): string[] {
-  let templates: string[] = TEMPLATES_BY_SITE[site];
-  if ( !templates ) {
-    templates = TEMPLATES_BY_SITE['other'];
-    notice.showNotificationBar(
-      'Your site is not fully supported.\n' +
-      'For better support, click on the popup where it says\n' +
-      '"CLICK HERE if you get incorrect results!",\n' +
-      'provide diagnostic information, and help me help you.',
-      document
-    );
+  if (TEMPLATE_BY_SITE.has(site)) {
+    return TEMPLATE_BY_SITE.get(site)!;
+  } else {
+    return TEMPLATE_BY_SITE.get('other')!;
   }
-  return templates.map(t => t + '&disableCsd=no-js');
 }
 
 function generateQueryString(
@@ -241,74 +255,83 @@ function generateQueryString(
     {
       site: site,
       year: year,
-      startOrderPos: startOrderPos
+      startOrderPos: startOrderPos,
     }
   );
+}
+
+type OrderHeaderPageData = {
+  headers: order_header.IOrderHeader[],
+  expectedOrderCount: number,
 };
 
 function translateOrdersPage(
   evt: any,
   period: string,  // log description of the period we are fetching orders for.
-): IOrdersPageData {
-  const d = util.parseStringToDOM(evt.target.responseText);
-  const context = 'Converting orders page';
-  const countSpan = util.findSingleNodeValue(
-    './/span[@class="num-orders"]', d.documentElement, context);
-  if ( !countSpan ) {
-    const msg = 'Error: cannot find order count elem in: '
-    + evt.target.responseText;
-    console.error(msg);
-    throw(msg);
-  }
-  const textContent = countSpan.textContent;
-  const splits = textContent!.split(' ');
-  if (splits.length == 0) {
-    const msg = 'Error: not enough parts';
-    console.error(msg);
-    throw(msg);
-  }
-  const expected_order_count: number = parseInt( splits[0], 10 );
-  console.log(
-    'Found ' + expected_order_count + ' orders for ' + period
-  );
-  if(isNaN(expected_order_count)) {
-    console.warn(
-      'Error: cannot find order count in ' + countSpan.textContent
-    );
-  }
-  let ordersElem;
+): OrderHeaderPageData {
   try {
-      ordersElem = d.getElementById('ordersContainer');
+    const opd = reallyTranslateOrdersPage(evt, period);
+    return opd;
+  } catch (ex) {
+    console.error('translateOrdersPage caught ', ex);
+    throw ex;
+  }
+}
+
+function reallyTranslateOrdersPage(
+  evt: any,
+  period: string,  // log description of the period we are fetching orders for.
+): OrderHeaderPageData {
+  const doc = util.parseStringToDOM(evt.target.responseText);
+  const expectedOrderCount = getExpectedOrderCountFromHeaderDoc(doc, evt.target.url);
+  let ordersElem;
+
+  try {
+    ordersElem = extraction.findSingleNodeValue(
+      '//div[contains(@class, "your-orders-content-container") '
+      + 'or @id="ordersContainer" '
+      + 'or @id="yourOrderInfoSection"]',
+      doc.documentElement,
+      'finding order list container for:' + period
+    ) as HTMLElement;
   } catch(err) {
     const msg = 'Error: maybe you\'re not logged into ' +
                 'https://' + urls.getSite() + '/gp/css/order-history ' +
                 err;
-    console.warn(msg)
+
+    console.warn(msg);
     throw msg;
   }
-  const order_elems: HTMLElement[] = util.findMultipleNodeValues(
-    './/*[contains(concat(" ", normalize-space(@class), " "), " order ")]',
-    ordersElem
+
+  const order_elems: HTMLElement[] = extraction.findMultipleNodeValues(
+    './/*['
+    + 'contains(concat(" ", normalize-space(@class), " "), " js-order-card ") '  // 2025 consumer accounts.
+    + 'or @id="orderCard"'  // 2025 business accounts (Amazon seems relaxed about id uniqueness).
+    + ']',
+    ordersElem,
   ).map( node => <HTMLElement>node );
+
   const serialized_order_elems = order_elems.map(
       elem => dom2json.toJSON(elem, getCachedAttributeNames())
+
   );
+
   if ( !serialized_order_elems.length ) {
     console.error(
-      'no order elements in converted order list page: ' +
+      'no order elements in converted order list page for ' + period + ': ' +
       evt.target.responseURL
     );
   }
-  const converted = {
-    expected_order_count: expected_order_count,
-    order_headers: order_elems.map(
-      elem => order_header.extractOrderHeader(elem, evt.target.responseURL)
-    ),
-  }
-  return converted;
-};
+
+  const headers = order_elems.map(
+    elem => order_header.extractOrderHeader(elem, evt.target.responseURL));
+
+  return {
+    headers,
+    expectedOrderCount,
+  };
+}
 
 function getCachedAttributeNames() {
   return new Set<string>(['class', 'href', 'id', 'style']);
 }
-
